@@ -3,7 +3,46 @@
 #include <math.h>
 #include <stdio.h>
 
-__global__ void kernel(rgb* data, big_rgb* work_buffer, unsigned int width, unsigned int height, unsigned int wb_width, unsigned wb_height, unsigned int c){
+__global__ void gather(rgb* data, big_rgb* work_buffer, unsigned int width, unsigned int height, unsigned int wb_width, unsigned wb_height, unsigned int c) {
+	unsigned int x = (blockIdx.x * 32) + threadIdx.x;
+	unsigned int y = (blockIdx.y * 32) + threadIdx.y;
+
+	if (x >= wb_width || y >= wb_height) {
+		//this is not at all efficient :(
+		return;
+	}
+
+	//cell height is input cell size
+	unsigned int cell_height = c;
+	//unless this is the last row of cells, and c does not evenly divide height
+	if (height%cell_height != 0 && y + 1 == wb_height) {
+		cell_height = height % cell_height;
+	}
+	unsigned int cell_y = y * c;
+	//cell width is input cell size
+	unsigned int cell_width = c;
+	//unless this is the last column of cells, and c does not evenly divide width
+	if (width%cell_width != 0 && x + 1 == wb_width) {
+		cell_width = width % cell_width;
+	}
+	unsigned int cell_size = cell_width * cell_height;
+
+	unsigned int cell_x = x * c;
+
+	big_rgb* output = &work_buffer[y*wb_width + x];
+
+	//averages
+	for (unsigned int cy = 0; cy < cell_height; cy++) {
+		for (unsigned int cx = 0; cx < cell_width; cx++) {
+			int i = ((cell_y + cy)*height) + cell_x + cx;
+			rgb_generic_add_assign(output, &data[i]);
+		}
+	}
+
+	rgb_generic_div_assign(&work_buffer[y*wb_width + x], cell_size);
+}
+
+__global__ void scatter(rgb* data, big_rgb* work_buffer, unsigned int width, unsigned int height, unsigned int wb_width, unsigned wb_height, unsigned int c){
 
     unsigned int x = (blockIdx.x * 32) + threadIdx.x;
     unsigned int y = (blockIdx.y * 32) + threadIdx.y;
@@ -27,27 +66,13 @@ __global__ void kernel(rgb* data, big_rgb* work_buffer, unsigned int width, unsi
         cell_width = width % cell_width;
     }
     unsigned int cell_size = cell_width * cell_height;
-    big_rgb avg = { 0,0,0 };
-
     unsigned int cell_x = x*c;
 
-    //averages
-    for (unsigned int cy = 0; cy < cell_height; cy++) {
-        for (unsigned int cx = 0; cx < cell_width; cx++) {
-            int i = ((cell_y + cy)*height) + cell_x + cx;
-            //partial global sum
-            rgb_generic_add_assign(&work_buffer[y*wb_width+x], &data[i]);
-            //cell sum
-            rgb_generic_add_assign(&avg, &data[i]);
-        }
-    }
-
-    rgb_generic_div_assign(&avg, cell_size);
-    rgb out = {
-        (unsigned char)avg.r,
-        (unsigned char)avg.g,
-        (unsigned char)avg.b
-    };
+	rgb out = {
+		(unsigned int)work_buffer[y*wb_width + x].r,
+		(unsigned int)work_buffer[y*wb_width + x].g,
+		(unsigned int)work_buffer[y*wb_width + x].b,
+	};
 
     //copy to all ouput buffer cells
     for (unsigned int cy = 0; cy < cell_height; cy++) {
@@ -92,7 +117,8 @@ void run_cuda(big_rgb* work_buffer, rgb* data, unsigned int width, unsigned int 
     dim3 threadsPerBlock(32,32,1);
 
 	cudaEventRecord(start);
-    kernel<<<blocksPerGrid, threadsPerBlock>>>(gpu_data,gpu_wb,width,height,wb_width,wb_height,c);
+    gather<<<blocksPerGrid, threadsPerBlock>>>(gpu_data,gpu_wb,width,height,wb_width,wb_height,c);
+	scatter<<<blocksPerGrid, threadsPerBlock>>>(gpu_data, gpu_wb, width, height, wb_width, wb_height, c);
 	cudaEventRecord(stop);
 	cudaEventSynchronize(stop);
     bail_on_cuda_error(cudaGetLastError());
