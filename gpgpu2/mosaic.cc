@@ -101,6 +101,20 @@ void print_help(){
 		   "\t               PPM_PLAIN_TEXT\n ");
 }
 
+// used to check c is a power of 2 (when popcount(c)==1)
+// __builtin_popcount could be used on some compilers,
+// or the POPCNT instruction could be used on most x86 computers
+// but this is more portable
+unsigned int popcount(unsigned int i) {
+	unsigned int count = 0;
+	for (; i > 0; i >>= 1) {
+		if (i & 1) {
+			count += 1;
+		}
+	}
+	return count;
+}
+
 int process_command_line(int argc, char *argv[]){
 	if (argc < 7){
 		fprintf(stderr, "Error: Missing program arguments. Correct usage is...\n");
@@ -111,11 +125,16 @@ int process_command_line(int argc, char *argv[]){
 	//first argument is always the executable name
     
 	//read in the non optional command line arguments
-	c = (unsigned int)atoi(argv[1]);
-	if (c > 4096){
+	int input_c = atoi(argv[1]);
+	if (input_c < 0 || input_c > 4096) {
 		fprintf(stderr, "Error: c must be less than or equal to 4096 and greater than 0");
 		return FAILURE;
 	}
+	if (popcount(input_c) != 1) {
+		fprintf(stderr, "Error: c must be a power of two (a number of the form 2^n where n is a positive integer)");
+		return FAILURE;
+	}
+	c = input_c;
 
 	//read in the mode
     if (strcmp("CPU",argv[2]) == 0){
