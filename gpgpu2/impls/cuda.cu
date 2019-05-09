@@ -33,11 +33,6 @@ __global__ void row_reduction(rgb* data, unsigned int width, unsigned int height
 			sdata[threadIdx.x].g += sdata[threadIdx.x + stride].g;
 			sdata[threadIdx.x].b += sdata[threadIdx.x + stride].b;
 
-			//zero the one we copied from for visualization purposes
-			sdata[threadIdx.x + stride].r = 0;
-			sdata[threadIdx.x + stride].g = 0;
-			sdata[threadIdx.x + stride].b = 0;
-
 			sdata[threadIdx.x].r /= 2;
 			sdata[threadIdx.x].g /= 2;
 			sdata[threadIdx.x].b /= 2;
@@ -45,11 +40,11 @@ __global__ void row_reduction(rgb* data, unsigned int width, unsigned int height
 		__syncthreads();
 	}
 
-	//if (threadIdx.x == 0) {
+	if (threadIdx.x == 0) {
 		data[px_x + y_offset].r = sdata[threadIdx.x].r;
 		data[px_x + y_offset].g = sdata[threadIdx.x].g;
 		data[px_x + y_offset].b = sdata[threadIdx.x].b;
-	//}
+	}
 }
 
 __global__ void launch_row_reductions(rgb* data, unsigned int width, unsigned int height, unsigned int num_cells_x, unsigned int c) {
@@ -75,17 +70,11 @@ __global__ void col_reduction(rgb* data, unsigned int width, unsigned int height
 		sdata[threadIdx.x].b = data[px_pos].b;
 	}
 	__syncthreads();
-	//TODO: stride needs to be a power of 2
 	for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
 		if (threadIdx.x < stride && px_y+stride < height) {
 			sdata[threadIdx.x].r += sdata[threadIdx.x + stride].r;
 			sdata[threadIdx.x].g += sdata[threadIdx.x + stride].g;
 			sdata[threadIdx.x].b += sdata[threadIdx.x + stride].b;
-
-			//zero the one we copied from for visualization purposes
-			sdata[threadIdx.x + stride].r = 0;
-			sdata[threadIdx.x + stride].g = 0;
-			sdata[threadIdx.x + stride].b = 0;
 
 			sdata[threadIdx.x].r /= 2;
 			sdata[threadIdx.x].g /= 2;
@@ -94,11 +83,11 @@ __global__ void col_reduction(rgb* data, unsigned int width, unsigned int height
 		__syncthreads();
 	}
 
-	//if (threadIdx.x == 0) {
+	if (threadIdx.x == 0) {
 		data[px_pos].r = sdata[threadIdx.x].r;
 		data[px_pos].g = sdata[threadIdx.x].g;
 		data[px_pos].b = sdata[threadIdx.x].b;
-	//}
+	}
 }
 
 __global__ void launch_col_reductions(rgb* data, unsigned int width, unsigned int height, unsigned int num_cells_y, unsigned int c) {
