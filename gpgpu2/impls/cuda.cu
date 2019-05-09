@@ -15,8 +15,9 @@
 //requirements:
 //   blockDim.x == c, blockDim.y == 1
 //   gridDim.x == num_cells_x , gridDim.y == 1
-__global__ void row_reduction(rgb* data, unsigned int width, unsigned int height, unsigned int y) {
+__global__ void row_reduction(rgb* data, unsigned int width, unsigned int height) {
 	extern __shared__ big_rgb sdata[];
+	unsigned int y = blockIdx.y;
 	unsigned int cell_start = blockIdx.x*blockDim.x;
 	unsigned int px_x = cell_start + threadIdx.x;
 	unsigned int y_offset = (y*width);
@@ -47,20 +48,11 @@ __global__ void row_reduction(rgb* data, unsigned int width, unsigned int height
 	}
 }
 
-__global__ void launch_row_reductions(rgb* data, unsigned int width, unsigned int height, unsigned int num_cells_x, unsigned int c) {
-	//launch child kernels in parallel
-	for (int y = 0; y < height; y++) {
-		row_reduction << < num_cells_x, c, c * sizeof(big_rgb) >> > (data, width, height, y);
-		cuda_check_error(cudaGetLastError());
-	}
-	//wait for child kernels
-	cuda_check_error(cudaDeviceSynchronize());
-}
-
 //col_reduction, similar to row_reduction but reduce the already reduced rows into columns
-__global__ void col_reduction(rgb* data, unsigned int width, unsigned int height, unsigned int x) {
+__global__ void col_reduction(rgb* data, unsigned int width, unsigned int height, unsigned int c) {
 	extern __shared__ big_rgb sdata[];
 	//load sdata
+	unsigned int x = blockIdx.y*c;
 	unsigned int cell_start_y = blockIdx.x*blockDim.x;
 	unsigned int px_y = cell_start_y + threadIdx.x;
 	unsigned int px_pos = x+(px_y*width);
@@ -88,16 +80,6 @@ __global__ void col_reduction(rgb* data, unsigned int width, unsigned int height
 		data[px_pos].g = sdata[threadIdx.x].g;
 		data[px_pos].b = sdata[threadIdx.x].b;
 	}
-}
-
-__global__ void launch_col_reductions(rgb* data, unsigned int width, unsigned int height, unsigned int num_cells_y, unsigned int c) {
-	//launch child kernels in parallel
-	for (int x = 0; x < width; x += c) {
-		col_reduction << < num_cells_y, c, c * sizeof(big_rgb) >> > (data, width, height, x);
-		cuda_check_error(cudaGetLastError());
-	}
-	//wait for child kernels
-	cuda_check_error(cudaDeviceSynchronize());
 }
 
 __global__ void scatter(rgb* data, unsigned int width, unsigned int height, unsigned int wb_width, unsigned wb_height, unsigned int c){
@@ -160,9 +142,10 @@ void run_cuda(big_rgb* work_buffer, rgb* data, unsigned int width, unsigned int 
     dim3 threadsPerBlock(32,32,1);
 
 	cuda_check_error(cudaEventRecord(start));
-	launch_row_reductions <<< 1, 1 >>> (gpu_data, width, height, num_cells_x, c);
+	row_reduction <<< dim3(num_cells_x,height,1), c, c * sizeof(big_rgb) >>> (gpu_data, width, height);
 	cuda_check_error(cudaGetLastError());
-	launch_col_reductions << < 1, 1 >> > (gpu_data, width, height, num_cells_y, c);
+	col_reduction <<< dim3(num_cells_y,width,1), c, c * sizeof(big_rgb) >>> (gpu_data, width, height, c);
+	cuda_check_error(cudaGetLastError());
 	scatter<<<blocksPerGrid, threadsPerBlock>>>(gpu_data, width, height, wb_width, wb_height, c);
 	cuda_check_error(cudaGetLastError());
 	cuda_check_error(cudaEventRecord(stop));
