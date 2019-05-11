@@ -16,7 +16,7 @@
 //   blockDim.x == c, blockDim.y == 1
 //   gridDim.x == num_cells_x , gridDim.y == 1
 __global__ void row_reduction(rgb* data, unsigned int width, unsigned int height) {
-	extern __shared__ big_rgb sdata[];
+	extern __shared__ big_rgb sdata[]
 	unsigned int y = blockIdx.y;
 	unsigned int cell_start = blockIdx.x*blockDim.x;
 	unsigned int px_x = cell_start + threadIdx.x;
@@ -30,13 +30,9 @@ __global__ void row_reduction(rgb* data, unsigned int width, unsigned int height
 	__syncthreads();
 	for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
 		if (threadIdx.x < stride && px_x+stride < width) {
-			sdata[threadIdx.x].r += sdata[threadIdx.x + stride].r;
-			sdata[threadIdx.x].g += sdata[threadIdx.x + stride].g;
-			sdata[threadIdx.x].b += sdata[threadIdx.x + stride].b;
-
-			sdata[threadIdx.x].r /= 2;
-			sdata[threadIdx.x].g /= 2;
-			sdata[threadIdx.x].b /= 2;
+			sdata[threadIdx.x].r = ((unsigned int)sdata[threadIdx.x].r + (unsigned int)sdata[threadIdx.x + stride].r) / 2;
+			sdata[threadIdx.x].g = ((unsigned int)sdata[threadIdx.x].g + (unsigned int)sdata[threadIdx.x + stride].g) / 2;
+			sdata[threadIdx.x].b = ((unsigned int)sdata[threadIdx.x].b + (unsigned int)sdata[threadIdx.x + stride].b) / 2;
 		}
 		__syncthreads();
 	}
@@ -111,10 +107,9 @@ __global__ void scatter(rgb* data, unsigned int width, unsigned int height, unsi
 	rgb out = data[cell_y*width + cell_x];
 
     //copy to all ouput buffer cells
-    for (unsigned int cy = 0; cy < cell_height; cy++) {
-        for (unsigned int cx = 0; cx < cell_width; cx++) {
-            int i = ((cell_y + cy)*width) + cell_x + cx;
-            data[i] = out;
+    for (unsigned int cy = cell_y; cy < cell_y+cell_height; cy++) {
+        for (unsigned int cx = cell_x; cx < cell_x+cell_width; cx++) {
+            data[(cy*width) + cx] = out;
         }
     }
 }
