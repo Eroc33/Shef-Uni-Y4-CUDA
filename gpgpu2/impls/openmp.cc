@@ -42,7 +42,7 @@ void run_openmp(rgb* data, unsigned int width, unsigned int height, unsigned int
 			//averages
 			for (unsigned int cy = 0; cy < cell_height; cy++) {
 				for (unsigned int cx = 0; cx < cell_width; cx++) {
-					int i = ((cell_y + cy)*height) + cell_x + cx;
+					int i = ((cell_y + cy)*width) + cell_x + cx;
 					//partial global sum
 					big_rgb_add_assign(&work_buffer[y*wb_width+x], &data[i]);
 					//cell sum
@@ -56,7 +56,7 @@ void run_openmp(rgb* data, unsigned int width, unsigned int height, unsigned int
 			//copy to all ouput buffer cells
 			for (unsigned int cy = 0; cy < cell_height; cy++) {
 				for (unsigned int cx = 0; cx < cell_width; cx++) {
-					int i = ((cell_y + cy)*height) + cell_x + cx;
+					int i = ((cell_y + cy)*width) + cell_x + cx;
 					data[i] = out;
 				}
 			}
