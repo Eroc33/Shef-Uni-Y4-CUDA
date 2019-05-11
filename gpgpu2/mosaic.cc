@@ -43,32 +43,27 @@ int main(int argc, char *argv[]) {
 	unsigned int wb_width = (width+(c-1))/c,
 		wb_height = (height+(c-1))/c;
 	printf("wb_width: %u, wb_height: %u\n",wb_width,wb_height);
-	//create the scaled workbuffer
-	big_rgb* work_buffer = (big_rgb*)malloc(sizeof(big_rgb)*wb_width*wb_height);
-	//must zero the memory, otherwise uninitialized values can cause artifacting
-	memset(work_buffer, 0, sizeof(big_rgb)*wb_width*wb_height);
 
 	//execute the mosaic filter based on the mode
 	switch (execution_mode){
 		case (CPU) : {
-			run_cpu(work_buffer,data,width,height,wb_width,wb_height,c);
+			run_cpu(data,width,height,wb_width,wb_height,c);
 			break;
 		}
 		case (OPENMP) : {
-			run_openmp(work_buffer,data,width,height,wb_width,wb_height,c);
+			run_openmp(data,width,height,wb_width,wb_height,c);
 			break;
 		}
 		case (CUDA) : {
-			run_cuda(work_buffer,data,width,height,wb_width,wb_height,c);
+			run_cuda(data,width,height,wb_width,wb_height,c);
 			break;
 		}
 		case (ALL) : {
-			run_cpu(work_buffer,data,width,height,wb_width,wb_height,c);
+			run_cpu(data,width,height,wb_width,wb_height,c);
 
-			//reset work buffer between implementations
-			memset(work_buffer, 0, sizeof(big_rgb)*wb_width*wb_height);
+			run_openmp(data,width,height,wb_width,wb_height,c);
 
-			run_openmp(work_buffer,data,width,height,wb_width,wb_height,c);
+			run_cuda(data, width, height, wb_width, wb_height, c);
 			break;
 		}
 	}
@@ -77,7 +72,6 @@ int main(int argc, char *argv[]) {
     write_ppm(output_filename,data,width,height,output_binary);
     
     //free image data
-	free(work_buffer);
     free(data);
 
 	return 0;
@@ -143,7 +137,9 @@ int process_command_line(int argc, char *argv[]){
         execution_mode = OPENMP;
     }else if (strcmp("CUDA",argv[2]) == 0){
         execution_mode = CUDA;
-    }
+    }else if (strcmp("ALL", argv[2]) == 0) {
+		execution_mode = ALL;
+	}
 
 
 	//read in the input image name

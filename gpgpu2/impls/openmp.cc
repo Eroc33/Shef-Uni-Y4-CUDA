@@ -2,10 +2,17 @@
 #include <omp.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-void run_openmp(big_rgb* work_buffer, rgb* data, unsigned int width, unsigned int height, unsigned int wb_width, unsigned int wb_height, unsigned int c){
+void run_openmp(rgb* data, unsigned int width, unsigned int height, unsigned int wb_width, unsigned int wb_height, unsigned int c){
 	//starting timing here
 	double begin = omp_get_wtime();
+
+	//create the scaled workbuffer
+	big_rgb* work_buffer = (big_rgb*)malloc(sizeof(big_rgb)*wb_width*wb_height);
+	//must zero the memory, otherwise uninitialized values can cause artifacting
+	memset(work_buffer, 0, sizeof(big_rgb)*wb_width*wb_height);
 
 	big_rgb global_avg = {0,0,0};
 
@@ -66,11 +73,13 @@ void run_openmp(big_rgb* work_buffer, rgb* data, unsigned int width, unsigned in
 	// Output the average colour value for the image
 	printf("OPENMP Average image colour red = %u, green = %u, blue = %u \n",(unsigned char)global_avg.r,(unsigned char)global_avg.g,(unsigned char)global_avg.b);
 
+	free(work_buffer);
+
 	//end timing here
 	double end = omp_get_wtime();
 	double seconds = (end - begin);
 
 	double s;
 	double ms = modf(seconds,&s)*1000.0;
-	printf("OPENMP mode execution time took %d s and %dms\n",(int)s,(int)ms);
+	printf("OPENMP mode execution time took %d s and %f ms\n",(int)s,ms);
 }

@@ -16,7 +16,7 @@
 //   blockDim.x == c, blockDim.y == 1
 //   gridDim.x == num_cells_x , gridDim.y == 1
 __global__ void row_reduction(rgb* data, unsigned int width, unsigned int height) {
-	extern __shared__ big_rgb sdata[];
+	extern __shared__ rgb sdata[];
 	unsigned int y = blockIdx.y;
 	unsigned int cell_start = blockIdx.x*blockDim.x;
 	unsigned int px_x = cell_start + threadIdx.x;
@@ -50,7 +50,7 @@ __global__ void row_reduction(rgb* data, unsigned int width, unsigned int height
 
 //col_reduction, similar to row_reduction but reduce the already reduced rows into columns
 __global__ void col_reduction(rgb* data, unsigned int width, unsigned int height, unsigned int c) {
-	extern __shared__ big_rgb sdata[];
+	extern __shared__ rgb sdata[];
 	//load sdata
 	unsigned int x = blockIdx.y*c;
 	unsigned int cell_start_y = blockIdx.x*blockDim.x;
@@ -64,13 +64,9 @@ __global__ void col_reduction(rgb* data, unsigned int width, unsigned int height
 	__syncthreads();
 	for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
 		if (threadIdx.x < stride && px_y+stride < height) {
-			sdata[threadIdx.x].r += sdata[threadIdx.x + stride].r;
-			sdata[threadIdx.x].g += sdata[threadIdx.x + stride].g;
-			sdata[threadIdx.x].b += sdata[threadIdx.x + stride].b;
-
-			sdata[threadIdx.x].r /= 2;
-			sdata[threadIdx.x].g /= 2;
-			sdata[threadIdx.x].b /= 2;
+			sdata[threadIdx.x].r = ((unsigned int)sdata[threadIdx.x].r + (unsigned int)sdata[threadIdx.x + stride].r) / 2;
+			sdata[threadIdx.x].g = ((unsigned int)sdata[threadIdx.x].g + (unsigned int)sdata[threadIdx.x + stride].g) / 2;
+			sdata[threadIdx.x].b = ((unsigned int)sdata[threadIdx.x].b + (unsigned int)sdata[threadIdx.x + stride].b) / 2;
 		}
 		__syncthreads();
 	}
@@ -119,7 +115,7 @@ __global__ void scatter(rgb* data, unsigned int width, unsigned int height, unsi
     }
 }
 
-void run_cuda(big_rgb* work_buffer, rgb* data, unsigned int width, unsigned int height, unsigned int wb_width, unsigned int wb_height, unsigned int c){
+void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int wb_width, unsigned int wb_height, unsigned int c){
 	cudaEvent_t start, stop;
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
@@ -142,9 +138,9 @@ void run_cuda(big_rgb* work_buffer, rgb* data, unsigned int width, unsigned int 
     dim3 threadsPerBlock(32,32,1);
 
 	cuda_check_error(cudaEventRecord(start));
-	row_reduction <<< dim3(num_cells_x,height,1), c, c * sizeof(big_rgb) >>> (gpu_data, width, height);
+	row_reduction <<< dim3(num_cells_x,height,1), c, c * sizeof(rgb) >>> (gpu_data, width, height);
 	cuda_check_error(cudaGetLastError());
-	col_reduction <<< dim3(num_cells_y,width,1), c, c * sizeof(big_rgb) >>> (gpu_data, width, height, c);
+	col_reduction <<< dim3(num_cells_y,width,1), c, c * sizeof(rgb) >>> (gpu_data, width, height, c);
 	cuda_check_error(cudaGetLastError());
 	scatter<<<blocksPerGrid, threadsPerBlock>>>(gpu_data, width, height, wb_width, wb_height, c);
 	cuda_check_error(cudaGetLastError());
@@ -170,5 +166,5 @@ void run_cuda(big_rgb* work_buffer, rgb* data, unsigned int width, unsigned int 
 
 	double s;
 	double ms = modf(seconds,&s)*1000.0;
-	printf("CUDA mode execution time took %d s and %dms (%f ms as measured by cuda)\n",(int)s,(int)ms,cudaMs);
+	printf("CUDA mode execution time took %d s and %f ms (%f ms as measured by cuda)\n",(int)s,ms,cudaMs);
 }
