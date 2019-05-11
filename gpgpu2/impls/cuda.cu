@@ -16,7 +16,7 @@
 //   blockDim.x == c, blockDim.y == 1
 //   gridDim.x == num_cells_x , gridDim.y == 1
 __global__ void row_reduction(rgb* data, unsigned int width, unsigned int height) {
-	extern __shared__ big_rgb sdata[]
+	extern __shared__ big_rgb sdata[];
 	unsigned int y = blockIdx.y;
 	unsigned int cell_start = blockIdx.x*blockDim.x;
 	unsigned int px_x = cell_start + threadIdx.x;
