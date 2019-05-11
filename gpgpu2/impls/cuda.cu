@@ -23,7 +23,7 @@ __global__ void gather(rgb* data, unsigned int width, unsigned int height) {
 	unsigned int px_y = cell_start_y + threadIdx.y;
 	unsigned int px_pos = px_x + (px_y*width);
 
-	unsigned int i = threadIdx.x+threadIdx.y*blockDim.x;
+	unsigned int i = threadIdx.x + threadIdx.y*blockDim.x;
 
 	if (px_x < width && px_y < height) {
 		sdata[i].r = data[px_pos].r;
@@ -32,7 +32,7 @@ __global__ void gather(rgb* data, unsigned int width, unsigned int height) {
 	}
 	__syncthreads();
 	for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-		if (threadIdx.x < stride && px_x+stride < width) {
+		if (threadIdx.x < stride && px_x + stride < width) {
 			sdata[i].r = ((unsigned int)sdata[i].r + (unsigned int)sdata[i + stride].r) / 2;
 			sdata[i].g = ((unsigned int)sdata[i].g + (unsigned int)sdata[i + stride].g) / 2;
 			sdata[i].b = ((unsigned int)sdata[i].b + (unsigned int)sdata[i + stride].b) / 2;
@@ -148,11 +148,16 @@ __global__ void global_avg(rgb* data, rgb* global_avg, unsigned int width, unsig
 	}
 }
 
-void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int wb_width, unsigned int wb_height, unsigned int c){
+void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int wb_width, unsigned int wb_height, unsigned int c) {
 	int cudaDevice;
 	int maxThreadsPerBlock;
+
+	cudaStream_t avg_stream, scatter_stream;
+	cuda_check_error(cudaStreamCreate(&avg_stream));
+	cuda_check_error(cudaStreamCreate(&scatter_stream));
+
 	cuda_check_error(cudaGetDevice(&cudaDevice));
-	cuda_check_error(cudaDeviceGetAttribute(&maxThreadsPerBlock,cudaDevAttrMaxThreadsPerBlock,cudaDevice));
+	cuda_check_error(cudaDeviceGetAttribute(&maxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, cudaDevice));
 
 	cudaEvent_t start, stop;
 	cudaEventCreate(&start);
@@ -164,34 +169,38 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 	int num_cells_x = (width + (c - 1)) / c;
 	int num_cells_y = (height + (c - 1)) / c;
 
-	int global_avg_dim = (int) ceil(sqrt((c * c) + (maxThreadsPerBlock-1) / maxThreadsPerBlock));
+	int global_avg_dim = (int)ceil(sqrt((c * c) + (maxThreadsPerBlock - 1) / maxThreadsPerBlock));
 
-    rgb* gpu_global_avg;
-    rgb* gpu_data;
-
-	cuda_check_error(cudaMalloc((void**)&gpu_global_avg, global_avg_dim *global_avg_dim *sizeof(rgb)));
-    cuda_check_error(cudaMalloc((void**)&gpu_data,width*height*sizeof(rgb)));
-    cuda_check_error(cudaMemcpy(gpu_data, data, width*height*sizeof(rgb), cudaMemcpyHostToDevice));
-
-    //run kernel code
-	cuda_check_error(cudaEventRecord(start));
-	gather <<< dim3(num_cells_x, num_cells_y,1), dim3(c,c,1), c * c * sizeof(rgb) >>> (gpu_data, width, height);
-	cuda_check_error(cudaGetLastError());
-	scatter <<< dim3(num_cells_y, num_cells_y, 1), dim3(c, c, 1), c * c * sizeof(rgb) >> > (gpu_data, width, height);
-	cuda_check_error(cudaGetLastError());
-
-
-	global_avg <<< dim3(global_avg_dim, global_avg_dim,1), dim3(num_cells_x/global_avg_dim, num_cells_y/global_avg_dim, 1), (num_cells_x / global_avg_dim) * (num_cells_y / global_avg_dim) * sizeof(rgb) >>> (gpu_data, gpu_global_avg, width, height, c);
-	cuda_check_error(cudaGetLastError());
-	cuda_check_error(cudaEventRecord(stop));
-	cuda_check_error(cudaEventSynchronize(stop));
-
-    cuda_check_error(cudaMemcpy(data, gpu_data, width*height*sizeof(rgb), cudaMemcpyDeviceToHost));
-
-	big_rgb global_avg = { 0,0,0 };
+	rgb* gpu_global_avg;
+	rgb* gpu_data;
 	rgb* pre_summed_avgs = (rgb*)malloc((global_avg_dim*global_avg_dim) * sizeof(rgb));
 
-	cuda_check_error(cudaMemcpy(pre_summed_avgs, gpu_global_avg, (global_avg_dim*global_avg_dim) * sizeof(rgb), cudaMemcpyDeviceToHost));
+	cuda_check_error(cudaMalloc((void**)&gpu_global_avg, global_avg_dim *global_avg_dim * sizeof(rgb)));
+	cuda_check_error(cudaMalloc((void**)&gpu_data, width*height * sizeof(rgb)));
+	cuda_check_error(cudaMemcpy(gpu_data, data, width*height * sizeof(rgb), cudaMemcpyHostToDevice));
+
+	//run kernel code
+	cuda_check_error(cudaEventRecord(start));
+	{
+		gather << < dim3(num_cells_x, num_cells_y, 1), dim3(c, c, 1), c * c * sizeof(rgb) >> > (gpu_data, width, height);
+		cuda_check_error(cudaGetLastError());
+		cuda_check_error(cudaDeviceSynchronize());
+	}
+	{
+		scatter << < dim3(num_cells_y, num_cells_y, 1), dim3(c, c, 1), c * c * sizeof(rgb), scatter_stream >> > (gpu_data, width, height);
+		cuda_check_error(cudaGetLastError());
+		cuda_check_error(cudaMemcpyAsync(data, gpu_data, width*height * sizeof(rgb), cudaMemcpyDeviceToHost, scatter_stream));
+	}
+
+	{
+		global_avg << < dim3(global_avg_dim, global_avg_dim, 1), dim3(num_cells_x / global_avg_dim, num_cells_y / global_avg_dim, 1), (num_cells_x / global_avg_dim) * (num_cells_y / global_avg_dim) * sizeof(rgb), avg_stream >> > (gpu_data, gpu_global_avg, width, height, c);
+		cuda_check_error(cudaGetLastError());
+		cuda_check_error(cudaMemcpyAsync(pre_summed_avgs, gpu_global_avg, (global_avg_dim*global_avg_dim) * sizeof(rgb), cudaMemcpyDeviceToHost, avg_stream));
+	}
+	//wait for average to complete, then do the final small gather on the cpu
+	cuda_check_error(cudaStreamSynchronize(avg_stream));
+
+	big_rgb global_avg = { 0,0,0 };
 
 	for (int i = 0; i < (global_avg_dim*global_avg_dim); i++) {
 		global_avg.r += pre_summed_avgs[i].r;
@@ -204,12 +213,24 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 	global_avg.r /= (global_avg_dim*global_avg_dim);
 	global_avg.g /= (global_avg_dim*global_avg_dim);
 	global_avg.b /= (global_avg_dim*global_avg_dim);
-    
-    cuda_check_error(cudaFree(gpu_data));
+
 	cuda_check_error(cudaFree(gpu_global_avg));
 
+	//wait for scatter to complete
+	cuda_check_error(cudaStreamSynchronize(scatter_stream));
+
+	//free scatter memory
+	cuda_check_error(cudaFree(gpu_data));
+
+	cuda_check_error(cudaStreamSynchronize(avg_stream));
+	cuda_check_error(cudaEventRecord(stop));
+	cuda_check_error(cudaEventSynchronize(stop));
+
+	cudaStreamDestroy(scatter_stream);
+	cudaStreamDestroy(avg_stream);
+
 	// Output the average colour value for the image
-	printf("CUDA Average image colour red = %u, green = %u, blue = %u \n",global_avg.r,global_avg.g,global_avg.b);
+	printf("CUDA Average image colour red = %u, green = %u, blue = %u \n", global_avg.r, global_avg.g, global_avg.b);
 
 	//end timing here
 	double end = omp_get_wtime();
@@ -217,9 +238,9 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 
 	float cudaMs;
 
-	cudaEventElapsedTime(&cudaMs,start,stop);
+	cudaEventElapsedTime(&cudaMs, start, stop);
 
 	double s;
-	double ms = modf(seconds,&s)*1000.0;
-	printf("CUDA mode execution time took %d s and %f ms (%f ms as measured by cuda)\n",(int)s,ms,cudaMs);
+	double ms = modf(seconds, &s)*1000.0;
+	printf("CUDA mode execution time took %d s and %f ms (%f ms as measured by cuda)\n", (int)s, ms, cudaMs);
 }
