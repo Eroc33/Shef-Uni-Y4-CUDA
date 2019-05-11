@@ -21,38 +21,35 @@ __global__ void row_reduction(rgb* data, unsigned int width, unsigned int height
 	unsigned int cell_start = blockIdx.x*blockDim.x;
 	unsigned int px_x = cell_start + threadIdx.x;
 	unsigned int y_offset = (y*width);
+	unsigned int px_pos = px_x + y_offset;
 
 	if (px_x < width) {
-		sdata[threadIdx.x].r = data[px_x + y_offset].r;
-		sdata[threadIdx.x].g = data[px_x + y_offset].g;
-		sdata[threadIdx.x].b = data[px_x + y_offset].b;
+		sdata[threadIdx.x].r = data[px_pos].r;
+		sdata[threadIdx.x].g = data[px_pos].g;
+		sdata[threadIdx.x].b = data[px_pos].b;
 	}
 	__syncthreads();
 	for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
 		if (threadIdx.x < stride && px_x+stride < width) {
-			sdata[threadIdx.x].r += sdata[threadIdx.x + stride].r;
-			sdata[threadIdx.x].g += sdata[threadIdx.x + stride].g;
-			sdata[threadIdx.x].b += sdata[threadIdx.x + stride].b;
-
-			sdata[threadIdx.x].r /= 2;
-			sdata[threadIdx.x].g /= 2;
-			sdata[threadIdx.x].b /= 2;
+			sdata[threadIdx.x].r = ((unsigned int)sdata[threadIdx.x].r + (unsigned int)sdata[threadIdx.x + stride].r) / 2;
+			sdata[threadIdx.x].g = ((unsigned int)sdata[threadIdx.x].g + (unsigned int)sdata[threadIdx.x + stride].g) / 2;
+			sdata[threadIdx.x].b = ((unsigned int)sdata[threadIdx.x].b + (unsigned int)sdata[threadIdx.x + stride].b) / 2;
 		}
 		__syncthreads();
 	}
 
 	if (threadIdx.x == 0) {
-		data[px_x + y_offset].r = sdata[threadIdx.x].r;
-		data[px_x + y_offset].g = sdata[threadIdx.x].g;
-		data[px_x + y_offset].b = sdata[threadIdx.x].b;
+		data[px_pos].r = sdata[threadIdx.x].r;
+		data[px_pos].g = sdata[threadIdx.x].g;
+		data[px_pos].b = sdata[threadIdx.x].b;
 	}
 }
 
 //col_reduction, similar to row_reduction but reduce the already reduced rows into columns
-__global__ void col_reduction(rgb* data, unsigned int width, unsigned int height, unsigned int c) {
+__global__ void col_reduction(rgb* data, unsigned int width, unsigned int height) {
 	extern __shared__ rgb sdata[];
 	//load sdata
-	unsigned int x = blockIdx.y*c;
+	unsigned int x = blockIdx.y*blockDim.x;
 	unsigned int cell_start_y = blockIdx.x*blockDim.x;
 	unsigned int px_y = cell_start_y + threadIdx.x;
 	unsigned int px_pos = x+(px_y*width);
@@ -78,41 +75,71 @@ __global__ void col_reduction(rgb* data, unsigned int width, unsigned int height
 	}
 }
 
-__global__ void scatter(rgb* data, unsigned int width, unsigned int height, unsigned int wb_width, unsigned wb_height, unsigned int c){
+//requirements:
+//   blockDim.x == c, blockDim.y == 1
+//   gridDim.x == num_cells_x , gridDim.y == 1
+__global__ void row_scatter(rgb* data, unsigned int width, unsigned int height) {
+	extern __shared__ rgb sdata[];
 
-    unsigned int x = (blockIdx.x * 32) + threadIdx.x;
-    unsigned int y = (blockIdx.y * 32) + threadIdx.y;
+	unsigned int y = blockIdx.y;
+	unsigned int cell_start = blockIdx.x*blockDim.x;
+	unsigned int px_x = cell_start + threadIdx.x;
+	unsigned int y_offset = (y*width);
+	unsigned int px_pos = px_x + y_offset;
 
-	if (x >= wb_width || y >= wb_height) {
-		//this is not at all efficient :(
-		return;
+	if (threadIdx.x == 0) {
+		sdata[threadIdx.x].r = data[px_pos].r;
+		sdata[threadIdx.x].g = data[px_pos].g;
+		sdata[threadIdx.x].b = data[px_pos].b;
 	}
-    
-    //cell height is input cell size
-    unsigned int cell_height = c;
-    //unless this is the last row of cells, and c does not evenly divide height
-    if (height%cell_height != 0 && y + 1 == wb_height) {
-        cell_height = height % cell_height;
-    }
-    unsigned int cell_y = y*c;
-    //cell width is input cell size
-    unsigned int cell_width = c;
-    //unless this is the last column of cells, and c does not evenly divide width
-    if (width%cell_width != 0 && x + 1 == wb_width) {
-        cell_width = width % cell_width;
-    }
-    unsigned int cell_size = cell_width * cell_height;
-    unsigned int cell_x = x*c;
 
-	rgb out = data[cell_y*width + cell_x];
+	__syncthreads();
+	for (unsigned int stride = 1; stride < blockDim.x; stride <<= 1) {
+		if (threadIdx.x < stride && px_x + stride < width) {
+			sdata[threadIdx.x + stride].r = sdata[threadIdx.x].r;
+			sdata[threadIdx.x + stride].g = sdata[threadIdx.x].g;
+			sdata[threadIdx.x + stride].b = sdata[threadIdx.x].b;
+		}
+		__syncthreads();
+	}
 
-    //copy to all ouput buffer cells
-    for (unsigned int cy = 0; cy < cell_height; cy++) {
-        for (unsigned int cx = 0; cx < cell_width; cx++) {
-            int i = ((cell_y + cy)*width) + cell_x + cx;
-            data[i] = out;
-        }
-    }
+	if (px_x < width) {
+		data[px_pos].r = sdata[threadIdx.x].r;
+		data[px_pos].g = sdata[threadIdx.x].g;
+		data[px_pos].b = sdata[threadIdx.x].b;
+	}
+}
+
+//col_reduction, similar to row_reduction but reduce the already reduced rows into columns
+__global__ void col_scatter(rgb* data, unsigned int width, unsigned int height) {
+	extern __shared__ rgb sdata[];
+	//load sdata
+	unsigned int x = blockIdx.y*blockDim.x;
+	unsigned int cell_start_y = blockIdx.x*blockDim.x;
+	unsigned int px_y = cell_start_y + threadIdx.x;
+	unsigned int px_pos = x + (px_y*width);
+
+	if (threadIdx.x == 0) {
+		sdata[threadIdx.x].r = data[px_pos].r;
+		sdata[threadIdx.x].g = data[px_pos].g;
+		sdata[threadIdx.x].b = data[px_pos].b;
+	}
+
+	__syncthreads();
+	for (unsigned int stride = 1; stride < blockDim.x; stride <<= 1) {
+		if (threadIdx.x < stride && px_y + stride < height) {
+			sdata[threadIdx.x + stride].r = sdata[threadIdx.x].r;
+			sdata[threadIdx.x + stride].g = sdata[threadIdx.x].g;
+			sdata[threadIdx.x + stride].b = sdata[threadIdx.x].b;
+		}
+		__syncthreads();
+	}
+
+	if (px_y < height) {
+		data[px_pos].r = sdata[threadIdx.x].r;
+		data[px_pos].g = sdata[threadIdx.x].g;
+		data[px_pos].b = sdata[threadIdx.x].b;
+	}
 }
 
 void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int wb_width, unsigned int wb_height, unsigned int c){
@@ -140,9 +167,11 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 	cuda_check_error(cudaEventRecord(start));
 	row_reduction <<< dim3(num_cells_x,height,1), c, c * sizeof(rgb) >>> (gpu_data, width, height);
 	cuda_check_error(cudaGetLastError());
-	col_reduction <<< dim3(num_cells_y,width,1), c, c * sizeof(rgb) >>> (gpu_data, width, height, c);
+	col_reduction <<< dim3(num_cells_y,width,1), c, c * sizeof(rgb) >>> (gpu_data, width, height);
 	cuda_check_error(cudaGetLastError());
-	scatter<<<blocksPerGrid, threadsPerBlock>>>(gpu_data, width, height, wb_width, wb_height, c);
+	col_scatter << < dim3(num_cells_y, width, 1), c, c * sizeof(rgb) >> > (gpu_data, width, height);
+	cuda_check_error(cudaGetLastError());
+	row_scatter << < dim3(num_cells_x, height, 1), c, c * sizeof(rgb) >> > (gpu_data, width, height);
 	cuda_check_error(cudaGetLastError());
 	cuda_check_error(cudaEventRecord(stop));
 	cuda_check_error(cudaEventSynchronize(stop));
