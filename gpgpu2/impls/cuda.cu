@@ -148,13 +148,17 @@ __global__ void global_avg(rgb* data, rgb* global_avg, unsigned int width, unsig
 	}
 }
 
+int global_avg_sm(int blockSize) {
+	return blockSize * sizeof(rgb);
+}
+
 void CUDART_CB cpu_avg(void* user_data) {
 	void** user_data_array = (void**)user_data;
 	big_rgb* global_avg = (big_rgb*)user_data_array[0];
 	rgb* pre_summed_avgs = (rgb*)user_data_array[1];
-	int global_avg_dim = *(int*)user_data_array[2];
+	int avg_block_size = *(int*)user_data_array[2];
 
-	for (int i = 0; i < (global_avg_dim*global_avg_dim); i++) {
+	for (int i = 0; i < avg_block_size; i++) {
 		global_avg->r += pre_summed_avgs[i].r;
 		global_avg->g += pre_summed_avgs[i].g;
 		global_avg->b += pre_summed_avgs[i].b;
@@ -162,9 +166,9 @@ void CUDART_CB cpu_avg(void* user_data) {
 
 	free(pre_summed_avgs);
 
-	global_avg->r /= (global_avg_dim*global_avg_dim);
-	global_avg->g /= (global_avg_dim*global_avg_dim);
-	global_avg->b /= (global_avg_dim*global_avg_dim);
+	global_avg->r /= avg_block_size;
+	global_avg->g /= avg_block_size;
+	global_avg->b /= avg_block_size;
 }
 
 void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int wb_width, unsigned int wb_height, unsigned int c) {
@@ -182,15 +186,23 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 	int num_cells_x = (width + (c - 1)) / c;
 	int num_cells_y = (height + (c - 1)) / c;
 
-	int global_avg_dim = (int)ceil(sqrt((c * c) + (maxThreadsPerBlock - 1) / maxThreadsPerBlock));
+	int avg_block_size;
+	int avg_grid_size;
+	cuda_check_error(cudaOccupancyMaxPotentialBlockSizeVariableSMem(&avg_grid_size, &avg_block_size, &global_avg, global_avg_sm, 0));
+
 	big_rgb host_global_avg = { 0,0,0 };
 
 	rgb* gpu_global_avg;
 	rgb* gpu_data;
-	rgb* pre_summed_avgs = (rgb*)malloc((global_avg_dim*global_avg_dim) * sizeof(rgb));
+	int avg_grid_dim = (num_cells_x*num_cells_y / avg_block_size);
+	rgb* pre_summed_avgs = (rgb*)malloc(avg_grid_dim * sizeof(rgb));
+	if (pre_summed_avgs == NULL) {
+		fprintf(stderr, "Could not allocate enough memory");
+		exit(EXIT_FAILURE);
+	}
 
 	//copy data
-	cuda_check_error(cudaMalloc((void**)&gpu_global_avg, global_avg_dim *global_avg_dim * sizeof(rgb)));
+	cuda_check_error(cudaMalloc((void**)&gpu_global_avg, avg_grid_dim * sizeof(rgb)));
 	cuda_check_error(cudaMalloc((void**)&gpu_data, width*height * sizeof(rgb)));
 
 	//setup graph
@@ -248,17 +260,24 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 
 	{
 
+		int block_x = sqrt(avg_block_size);
+		int block_y = block_x;
+		int grid_dim_x = num_cells_x + (block_x - 1) / block_x;
+		int grid_dim_y = num_cells_y + (block_y - 1) / block_y;
+
 		void *args[5] = { &gpu_data, &gpu_global_avg, &width, &height, &c };
 
 		cudaGraphNode_t dependencies[1] = { gather_node };
 
 		cudaKernelNodeParams params = { 0 };
 		params.func = &global_avg;
-		params.gridDim = dim3(global_avg_dim, global_avg_dim, 1);
-		params.blockDim = dim3(num_cells_x / global_avg_dim, num_cells_y / global_avg_dim, 1);
-		params.sharedMemBytes = (num_cells_x / global_avg_dim) * (num_cells_y / global_avg_dim) * sizeof(rgb);
+		params.gridDim = dim3(grid_dim_x, grid_dim_y, 1);
+		params.blockDim = dim3(block_x, block_y, 1);
+		params.sharedMemBytes = block_x* block_y * sizeof(rgb);
 		params.kernelParams = args;
 		params.extra = NULL;
+
+		fprintf(stderr, "avg_block_size: %d, block_x: %d, block_y: %d, grid_dim_x: %d, grid_dim_y: %d, required_sm: %d\n", avg_block_size, block_x, block_y, grid_dim_x, grid_dim_y, block_x * block_y * sizeof(rgb));
 
 		cuda_check_error(cudaGraphAddKernelNode(&avg_node, graph, dependencies, 1, &params));
 	}
@@ -286,12 +305,11 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 		cudaMemcpy3DParms params = { 0 };
 		params.srcArray = NULL;
 		params.srcPos = make_cudaPos(0, 0, 0);
-		params.srcPtr =
-			make_cudaPitchedPtr(gpu_global_avg, sizeof(rgb) * global_avg_dim * global_avg_dim, global_avg_dim * global_avg_dim, 1);
+		params.srcPtr = make_cudaPitchedPtr(gpu_global_avg, sizeof(rgb) * avg_grid_dim, avg_grid_dim, 1);
 		params.dstArray = NULL;
 		params.dstPos = make_cudaPos(0, 0, 0);
-		params.dstPtr = make_cudaPitchedPtr(pre_summed_avgs, sizeof(rgb) * global_avg_dim * global_avg_dim, global_avg_dim * global_avg_dim, 1);
-		params.extent = make_cudaExtent(sizeof(rgb) * global_avg_dim * global_avg_dim, 1, 1);
+		params.dstPtr = make_cudaPitchedPtr(pre_summed_avgs, sizeof(rgb) * avg_grid_dim, avg_grid_dim, 1);
+		params.extent = make_cudaExtent(sizeof(rgb) * avg_grid_dim, 1, 1);
 		params.kind = cudaMemcpyDeviceToHost;
 
 		cuda_check_error(cudaGraphAddMemcpyNode(&cpy_avg_out, graph, dependencies, 1, &params));
@@ -300,7 +318,7 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 	{
 		cudaGraphNode_t dependencies[1] = { cpy_avg_out };
 
-		void* user_data[3] = {&host_global_avg, pre_summed_avgs, &global_avg_dim};
+		void* user_data[3] = {&host_global_avg, pre_summed_avgs, &avg_block_size };
 
 		cudaHostNodeParams params = { 0 };
 		params.fn = cpu_avg;
