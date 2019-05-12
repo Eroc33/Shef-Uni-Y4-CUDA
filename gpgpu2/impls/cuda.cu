@@ -8,121 +8,155 @@
 	cudaError_t err = (err_expr);\
 	if(err != cudaSuccess){\
 		printf("FATAL: Encountered cuda error: %s (%s) (%s,%u).\n Quitting.\n", cudaGetErrorName(err), cudaGetErrorString(err), __FILE__, __LINE__);\
-		assert(0);\
+		exit(EXIT_FAILURE);\
 	}\
 }
 
 //requirements:
-//   blockDim.x == c, blockDim.y == 1
-//   gridDim.x == num_cells_x , gridDim.y == 1
+//   blockDim.x == c, blockDim.y == n
+//   gridDim.x == num_cells_x , gridDim.y == ceil(height/n)
 __global__ void row_reduction(rgb* data, unsigned int width, unsigned int height) {
 	extern __shared__ rgb sdata[];
-	unsigned int y = blockIdx.y;
-	unsigned int cell_start = blockIdx.x*blockDim.x;
-	unsigned int px_x = cell_start + threadIdx.x;
-	unsigned int y_offset = (y*width);
 
-	if (px_x < width) {
-		sdata[threadIdx.x].r = data[px_x + y_offset].r;
-		sdata[threadIdx.x].g = data[px_x + y_offset].g;
-		sdata[threadIdx.x].b = data[px_x + y_offset].b;
+	unsigned int px_x = (blockIdx.x*blockDim.x) + threadIdx.x;
+	unsigned int px_y = (blockIdx.y*blockDim.y) + threadIdx.y;
+	unsigned int px_pos = px_x + (px_y*width);
+
+	unsigned int i = threadIdx.x + (threadIdx.y * blockDim.x);
+
+	if (px_x < width && px_y < height) {
+		sdata[i].r = data[px_pos].r;
+		sdata[i].g = data[px_pos].g;
+		sdata[i].b = data[px_pos].b;
 	}
 	__syncthreads();
 	for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-		if (threadIdx.x < stride && px_x+stride < width) {
-			sdata[threadIdx.x].r += sdata[threadIdx.x + stride].r;
-			sdata[threadIdx.x].g += sdata[threadIdx.x + stride].g;
-			sdata[threadIdx.x].b += sdata[threadIdx.x + stride].b;
-
-			sdata[threadIdx.x].r /= 2;
-			sdata[threadIdx.x].g /= 2;
-			sdata[threadIdx.x].b /= 2;
+		if (threadIdx.x < stride && px_x + stride < width && px_y < height) {
+			sdata[i].r = ((unsigned int)sdata[i].r + (unsigned int)sdata[i + stride].r) / 2;
+			sdata[i].g = ((unsigned int)sdata[i].g + (unsigned int)sdata[i + stride].g) / 2;
+			sdata[i].b = ((unsigned int)sdata[i].b + (unsigned int)sdata[i + stride].b) / 2;
 		}
 		__syncthreads();
 	}
 
 	if (threadIdx.x == 0) {
-		data[px_x + y_offset].r = sdata[threadIdx.x].r;
-		data[px_x + y_offset].g = sdata[threadIdx.x].g;
-		data[px_x + y_offset].b = sdata[threadIdx.x].b;
+		data[px_pos].r = sdata[i].r;
+		data[px_pos].g = sdata[i].g;
+		data[px_pos].b = sdata[i].b;
 	}
 }
 
-//col_reduction, similar to row_reduction but reduce the already reduced rows into columns
-__global__ void col_reduction(rgb* data, unsigned int width, unsigned int height, unsigned int c) {
+//requirements:
+//   blockDim.x == 1, blockDim.y == c
+//   gridDim.x == height , gridDim.y == num_cells_y
+__global__ void col_reduction(rgb* data, unsigned int width, unsigned int height) {
+	extern __shared__ rgb sdata[];
+
+	unsigned int px_x = (blockIdx.x*blockDim.x) + threadIdx.x;
+	unsigned int px_y = (blockIdx.y*blockDim.y) + threadIdx.y;
+	unsigned int px_pos = px_x + (px_y*width);
+
+	unsigned int i = threadIdx.y + (threadIdx.x * blockDim.y);
+
+	if (px_y < height && px_x < width) {
+		sdata[i].r = data[px_pos].r;
+		sdata[i].g = data[px_pos].g;
+		sdata[i].b = data[px_pos].b;
+	}
+	__syncthreads();
+	for (unsigned int stride = blockDim.y / 2; stride > 0; stride >>= 1) {
+		if (threadIdx.y < stride && px_y + stride < height && px_x < width) {
+			sdata[i].r = ((unsigned int)sdata[i].r + (unsigned int)sdata[i + stride].r) / 2;
+			sdata[i].g = ((unsigned int)sdata[i].g + (unsigned int)sdata[i + stride].g) / 2;
+			sdata[i].b = ((unsigned int)sdata[i].b + (unsigned int)sdata[i + stride].b) / 2;
+		}
+		__syncthreads();
+	}
+
+	if (threadIdx.y == 0) {
+		data[px_pos].r = sdata[i].r;
+		data[px_pos].g = sdata[i].g;
+		data[px_pos].b = sdata[i].b;
+	}
+}
+
+//requirements:
+//   blockDim.x == c, blockDim.y == 1
+//   gridDim.x == num_cells_x , gridDim.y == height
+__global__ void row_scatter(rgb* data, unsigned int width, unsigned int height) {
+	extern __shared__ rgb sdata[];
+
+	unsigned int px_x = blockIdx.x*blockDim.x + threadIdx.x;
+	unsigned int px_y = blockIdx.y*blockDim.y + threadIdx.y;
+	unsigned int px_pos = px_x + (px_y*width);
+
+	unsigned int i = threadIdx.x + (threadIdx.y * blockDim.x);
+
+	if (threadIdx.x == 0) {
+		sdata[i].r = data[px_pos].r;
+		sdata[i].g = data[px_pos].g;
+		sdata[i].b = data[px_pos].b;
+	}
+
+	__syncthreads();
+	for (unsigned int stride = 1; stride < blockDim.x; stride <<= 1) {
+		if (threadIdx.x < stride && px_x + stride < width && px_y < height) {
+			sdata[i + stride].r = sdata[i].r;
+			sdata[i + stride].g = sdata[i].g;
+			sdata[i + stride].b = sdata[i].b;
+		}
+		__syncthreads();
+	}
+
+	if (px_x < width && px_y < height) {
+		data[px_pos].r = sdata[i].r;
+		data[px_pos].g = sdata[i].g;
+		data[px_pos].b = sdata[i].b;
+	}
+}
+
+//requirements:
+//   blockDim.x == 1, blockDim.y == c
+//   gridDim.x == width , gridDim.y == num_cells_y
+__global__ void col_scatter(rgb* data, unsigned int width, unsigned int height) {
 	extern __shared__ rgb sdata[];
 	//load sdata
-	unsigned int x = blockIdx.y*c;
-	unsigned int cell_start_y = blockIdx.x*blockDim.x;
-	unsigned int px_y = cell_start_y + threadIdx.x;
-	unsigned int px_pos = x+(px_y*width);
-	if (px_y < height) {
-		sdata[threadIdx.x].r = data[px_pos].r;
-		sdata[threadIdx.x].g = data[px_pos].g;
-		sdata[threadIdx.x].b = data[px_pos].b;
+	unsigned int px_x = (blockIdx.x*blockDim.x) + threadIdx.x;
+	unsigned int px_y = (blockIdx.y*blockDim.y) + threadIdx.y;
+	unsigned int px_pos = px_x + (px_y*width);
+
+	unsigned int i = threadIdx.y + (threadIdx.x * blockDim.y);
+
+	if (threadIdx.y == 0) {
+		sdata[i].r = data[px_pos].r;
+		sdata[i].g = data[px_pos].g;
+		sdata[i].b = data[px_pos].b;
 	}
+
 	__syncthreads();
-	for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-		if (threadIdx.x < stride && px_y+stride < height) {
-			sdata[threadIdx.x].r = ((unsigned int)sdata[threadIdx.x].r + (unsigned int)sdata[threadIdx.x + stride].r) / 2;
-			sdata[threadIdx.x].g = ((unsigned int)sdata[threadIdx.x].g + (unsigned int)sdata[threadIdx.x + stride].g) / 2;
-			sdata[threadIdx.x].b = ((unsigned int)sdata[threadIdx.x].b + (unsigned int)sdata[threadIdx.x + stride].b) / 2;
+	for (unsigned int stride = 1; stride < blockDim.y; stride <<= 1) {
+		if (threadIdx.y < stride && px_y + stride < height && px_x < width) {
+			sdata[i + stride].r = sdata[i].r;
+			sdata[i + stride].g = sdata[i].g;
+			sdata[i + stride].b = sdata[i].b;
 		}
 		__syncthreads();
 	}
 
-	if (threadIdx.x == 0) {
-		data[px_pos].r = sdata[threadIdx.x].r;
-		data[px_pos].g = sdata[threadIdx.x].g;
-		data[px_pos].b = sdata[threadIdx.x].b;
+	if (px_y < height && px_x < width) {
+		data[px_pos].r = sdata[i].r;
+		data[px_pos].g = sdata[i].g;
+		data[px_pos].b = sdata[i].b;
 	}
-}
-
-__global__ void scatter(rgb* data, unsigned int width, unsigned int height, unsigned int wb_width, unsigned wb_height, unsigned int c){
-
-    unsigned int x = (blockIdx.x * 32) + threadIdx.x;
-    unsigned int y = (blockIdx.y * 32) + threadIdx.y;
-
-	if (x >= wb_width || y >= wb_height) {
-		//this is not at all efficient :(
-		return;
-	}
-    
-    //cell height is input cell size
-    unsigned int cell_height = c;
-    //unless this is the last row of cells, and c does not evenly divide height
-    if (height%cell_height != 0 && y + 1 == wb_height) {
-        cell_height = height % cell_height;
-    }
-    unsigned int cell_y = y*c;
-    //cell width is input cell size
-    unsigned int cell_width = c;
-    //unless this is the last column of cells, and c does not evenly divide width
-    if (width%cell_width != 0 && x + 1 == wb_width) {
-        cell_width = width % cell_width;
-    }
-    unsigned int cell_size = cell_width * cell_height;
-    unsigned int cell_x = x*c;
-
-	rgb out = data[cell_y*width + cell_x];
-
-    //copy to all ouput buffer cells
-    for (unsigned int cy = 0; cy < cell_height; cy++) {
-        for (unsigned int cx = 0; cx < cell_width; cx++) {
-            int i = ((cell_y + cy)*width) + cell_x + cx;
-            data[i] = out;
-        }
-    }
 }
 
 //requirements:
 //   blockDim.x == num_cells_x/gridDim.x, blockDim.y == num_cells_y/gridDim.y
-__global__ void global_avg(rgb* data, rgb* global_avg, unsigned int width, unsigned int height, unsigned int c) {
+__global__ void global_avg(const rgb* data, rgb* global_avg, unsigned int width, unsigned int height, unsigned int c) {
 	extern __shared__ rgb sdata[];
-	unsigned int px_x = threadIdx.x*c + blockIdx.x*blockDim.x;
-	unsigned int px_y = threadIdx.y*c + blockIdx.y*blockDim.y;
-	unsigned int y_offset = (px_y*width);
-	unsigned int px_pos = px_x + y_offset;
+	unsigned int px_x = (blockIdx.x*blockDim.x) + threadIdx.x;
+	unsigned int px_y = (blockIdx.y*blockDim.y) + threadIdx.y;
+	unsigned int px_pos = px_x + (px_y*width);
 
 	unsigned int i = threadIdx.x + threadIdx.y*blockDim.x;
 
@@ -153,19 +187,18 @@ __global__ void global_avg(rgb* data, rgb* global_avg, unsigned int width, unsig
 		__syncthreads();
 	}
 
-	if (i == 0) {
+	if (i == 0 && px_x < width && px_y < height) {
 		global_avg[blockIdx.x + blockIdx.y*gridDim.x].r = sdata[i].r;
 		global_avg[blockIdx.x + blockIdx.y*gridDim.x].g = sdata[i].g;
 		global_avg[blockIdx.x + blockIdx.y*gridDim.x].b = sdata[i].b;
 	}
 }
 
-void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int wb_width, unsigned int wb_height, unsigned int c) {
-	int cudaDevice;
-	int maxThreadsPerBlock;
-	cuda_check_error(cudaGetDevice(&cudaDevice));
-	cuda_check_error(cudaDeviceGetAttribute(&maxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, cudaDevice));
+int global_avg_sm(int blockSize) {
+	return blockSize * sizeof(rgb);
+}
 
+void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int wb_width, unsigned int wb_height, unsigned int c) {
 	cudaEvent_t start, stop;
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
@@ -173,46 +206,67 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 	//starting cpu based timing here
 	double begin = omp_get_wtime();
 
-	int num_cells_x = (width + (c - 1)) / c;
-	int num_cells_y = (height + (c - 1)) / c;
-
-	int global_avg_dim = (int)ceil(sqrt((c * c) + (maxThreadsPerBlock - 1) / maxThreadsPerBlock));
+	int num_cells_x = wb_width;
+	int num_cells_y = wb_height;
 
 	rgb* gpu_global_avg;
 	rgb* gpu_data;
-	rgb* pre_summed_avgs = (rgb*)malloc((global_avg_dim*global_avg_dim) * sizeof(rgb));
 
-	cuda_check_error(cudaMalloc((void**)&gpu_global_avg, global_avg_dim *global_avg_dim * sizeof(rgb)));
+	//cudaOccupancyMaxPotentialBlockSizeVariableSMem was being used here initially,
+	//but the averaging kernel is limited by blocks, so we actually want a fairly small block size
+	//even with a blocksize of only 4 it still is limited by blocks so it might be better
+	//to use the cpu for this
+	int avg_block_size = 4;
+
+	int avg_grid_dim = (num_cells_x*num_cells_y + (avg_block_size-1)) / avg_block_size;
+
+	rgb* pre_summed_avgs = (rgb*)malloc(avg_grid_dim * sizeof(rgb));
+	if (pre_summed_avgs == NULL) {
+		fprintf(stderr, "Could not allocate enough memory");
+		exit(EXIT_FAILURE);
+	}
+
+	cuda_check_error(cudaMalloc((void**)&gpu_global_avg, avg_grid_dim * sizeof(rgb)));
 	cuda_check_error(cudaMalloc((void**)&gpu_data, width*height * sizeof(rgb)));
 	cuda_check_error(cudaMemcpy(gpu_data, data, width*height * sizeof(rgb), cudaMemcpyHostToDevice));
 
 
 	//run kernel code
 	cuda_check_error(cudaEventRecord(start));
+	//56 is based on the max shared memory size for most cuda devices
+	int sub_block_size = (56 + (c - 1)) / c;
 	{
-		row_reduction << < dim3(num_cells_x, height, 1), c, c * sizeof(rgb) >> > (gpu_data, width, height);
+		row_reduction << < dim3(num_cells_x, height/sub_block_size, 1), dim3(c, sub_block_size, 1), sub_block_size * c * sizeof(rgb) >> > (gpu_data, width, height);
 		cuda_check_error(cudaGetLastError());
+		fprintf(stderr, "row_reduction done\n");
+		col_reduction << < dim3(width/ sub_block_size, num_cells_y, 1), dim3(sub_block_size, c, 1), sub_block_size * c * sizeof(rgb) >> > (gpu_data, width, height);
+		cuda_check_error(cudaGetLastError());
+		fprintf(stderr, "col_reduction done\n");
 	}
 	{
-		col_reduction << < dim3(num_cells_y, width, 1), c, c * sizeof(rgb) >> > (gpu_data, width, height, c);
+		col_scatter << < dim3(width/ sub_block_size, num_cells_y, 1), dim3(sub_block_size, c, 1), sub_block_size * c * sizeof(rgb) >> > (gpu_data, width, height);
 		cuda_check_error(cudaGetLastError());
+		fprintf(stderr, "col_scatter done\n");
+		row_scatter << < dim3(num_cells_x, height/ sub_block_size, 1), dim3(c, sub_block_size, 1), sub_block_size * c * sizeof(rgb) >> > (gpu_data, width, height);
+		cuda_check_error(cudaGetLastError());
+		fprintf(stderr, "row_scatter done\n");
 	}
 	{
-		dim3 blocksPerGrid((wb_width + (32 - 1)) / 32, (wb_height + (32 - 1)) / 32, 1);
-		dim3 threadsPerBlock(32, 32, 1);
-		scatter << <blocksPerGrid, threadsPerBlock >> > (gpu_data, width, height, wb_width, wb_height, c);
+		int block_x = sqrt(avg_block_size);
+		int block_y = block_x;
+		int grid_dim_x = (num_cells_x + (block_x - 1)) / block_x;
+		int grid_dim_y = (num_cells_y + (block_y - 1)) / block_y;
+		global_avg << < dim3(grid_dim_x, grid_dim_y, 1), dim3(block_x, block_y, 1), block_x * block_y * sizeof(rgb) >> > (gpu_data, gpu_global_avg, width, height, c);
 		cuda_check_error(cudaGetLastError());
 	}
-	{
-		global_avg << < dim3(global_avg_dim, global_avg_dim, 1), dim3(num_cells_x / global_avg_dim, num_cells_y / global_avg_dim, 1), (num_cells_x / global_avg_dim) * (num_cells_y / global_avg_dim) * sizeof(rgb) >> > (gpu_data, gpu_global_avg, width, height, c);
-		cuda_check_error(cudaGetLastError());
-	}
+	cuda_check_error(cudaDeviceSynchronize());
 
-	cuda_check_error(cudaMemcpy(pre_summed_avgs, gpu_global_avg, (global_avg_dim*global_avg_dim) * sizeof(rgb), cudaMemcpyDeviceToHost));
+	cuda_check_error(cudaMemcpy(data, gpu_data, width*height * sizeof(rgb), cudaMemcpyDeviceToHost));
+	cuda_check_error(cudaMemcpy(pre_summed_avgs, gpu_global_avg, avg_grid_dim * sizeof(rgb), cudaMemcpyDeviceToHost));
 
 	big_rgb global_avg = { 0,0,0 };
 
-	for (int i = 0; i < (global_avg_dim*global_avg_dim); i++) {
+	for (int i = 0; i < avg_grid_dim; i++) {
 		global_avg.r += pre_summed_avgs[i].r;
 		global_avg.g += pre_summed_avgs[i].g;
 		global_avg.b += pre_summed_avgs[i].b;
@@ -220,12 +274,11 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 
 	free(pre_summed_avgs);
 
-	global_avg.r /= (global_avg_dim*global_avg_dim);
-	global_avg.g /= (global_avg_dim*global_avg_dim);
-	global_avg.b /= (global_avg_dim*global_avg_dim);
+	global_avg.r /= avg_grid_dim;
+	global_avg.g /= avg_grid_dim;
+	global_avg.b /= avg_grid_dim;
 
 	cuda_check_error(cudaFree(gpu_global_avg));
-	cuda_check_error(cudaMemcpy(data, gpu_data, width*height * sizeof(rgb), cudaMemcpyDeviceToHost));
 	cuda_check_error(cudaFree(gpu_data));
 
 	cuda_check_error(cudaEventRecord(stop));
