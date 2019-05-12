@@ -8,7 +8,7 @@
 	cudaError_t err = (err_expr);\
 	if(err != cudaSuccess){\
 		printf("FATAL: Encountered cuda error: %s (%s) (%s,%u).\n Quitting.\n", cudaGetErrorName(err), cudaGetErrorString(err), __FILE__, __LINE__);\
-		assert(0);\
+		exit(EXIT_FAILURE);\
 	}\
 }
 
@@ -148,20 +148,33 @@ __global__ void global_avg(rgb* data, rgb* global_avg, unsigned int width, unsig
 	}
 }
 
+void CUDART_CB cpu_avg(void* user_data) {
+	void** user_data_array = (void**)user_data;
+	big_rgb* global_avg = (big_rgb*)user_data_array[0];
+	rgb* pre_summed_avgs = (rgb*)user_data_array[1];
+	int global_avg_dim = *(int*)user_data_array[2];
+
+	for (int i = 0; i < (global_avg_dim*global_avg_dim); i++) {
+		global_avg->r += pre_summed_avgs[i].r;
+		global_avg->g += pre_summed_avgs[i].g;
+		global_avg->b += pre_summed_avgs[i].b;
+	}
+
+	free(pre_summed_avgs);
+
+	global_avg->r /= (global_avg_dim*global_avg_dim);
+	global_avg->g /= (global_avg_dim*global_avg_dim);
+	global_avg->b /= (global_avg_dim*global_avg_dim);
+}
+
 void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int wb_width, unsigned int wb_height, unsigned int c) {
 	int cudaDevice;
 	int maxThreadsPerBlock;
-
-	cudaStream_t avg_stream, scatter_stream;
-	cuda_check_error(cudaStreamCreate(&avg_stream));
-	cuda_check_error(cudaStreamCreate(&scatter_stream));
-
 	cuda_check_error(cudaGetDevice(&cudaDevice));
 	cuda_check_error(cudaDeviceGetAttribute(&maxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, cudaDevice));
 
-	cudaEvent_t start, stop;
-	cudaEventCreate(&start);
-	cudaEventCreate(&stop);
+	cudaStream_t stream;
+	cuda_check_error(cudaStreamCreate(&stream));
 
 	//starting cpu based timing here
 	double begin = omp_get_wtime();
@@ -170,67 +183,155 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 	int num_cells_y = (height + (c - 1)) / c;
 
 	int global_avg_dim = (int)ceil(sqrt((c * c) + (maxThreadsPerBlock - 1) / maxThreadsPerBlock));
+	big_rgb host_global_avg = { 0,0,0 };
 
 	rgb* gpu_global_avg;
 	rgb* gpu_data;
 	rgb* pre_summed_avgs = (rgb*)malloc((global_avg_dim*global_avg_dim) * sizeof(rgb));
 
+	//copy data
 	cuda_check_error(cudaMalloc((void**)&gpu_global_avg, global_avg_dim *global_avg_dim * sizeof(rgb)));
 	cuda_check_error(cudaMalloc((void**)&gpu_data, width*height * sizeof(rgb)));
-	cuda_check_error(cudaMemcpy(gpu_data, data, width*height * sizeof(rgb), cudaMemcpyHostToDevice));
+
+	//setup graph
+	cudaGraph_t graph;
+	cudaGraphNode_t cpy_data_in_node, cpy_data_out_node, gather_node, scatter_node, avg_node, cpy_avg_out, cpu_avg_node;
+
+	cuda_check_error(cudaGraphCreate(&graph, 0));
+
+	{
+		cudaMemcpy3DParms params = { 0 };
+		params.srcArray = NULL;
+		params.srcPos = make_cudaPos(0, 0, 0);
+		params.srcPtr =
+			make_cudaPitchedPtr(data, sizeof(rgb) * width * height, width * height, 1);
+		params.dstArray = NULL;
+		params.dstPos = make_cudaPos(0, 0, 0);
+		params.dstPtr = make_cudaPitchedPtr(gpu_data, sizeof(rgb) * width * height, width * height, 1);
+		params.extent = make_cudaExtent(sizeof(rgb) * width * height, 1, 1);
+		params.kind = cudaMemcpyHostToDevice;
+
+		cuda_check_error(cudaGraphAddMemcpyNode(&cpy_data_in_node, graph, NULL, 0, &params));
+	}
+
+	{
+		void *args[3] = { &gpu_data, &width, &height };
+
+		cudaGraphNode_t gather_dependencies[1] = { cpy_data_in_node };
+
+		cudaKernelNodeParams gather_params = {0};
+		gather_params.func = &gather;
+		gather_params.gridDim = dim3(num_cells_x, num_cells_y, 1);
+		gather_params.blockDim = dim3(c, c, 1);
+		gather_params.sharedMemBytes = c * c * sizeof(rgb);
+		gather_params.kernelParams = args;
+		gather_params.extra = NULL;
+
+		cuda_check_error(cudaGraphAddKernelNode(&gather_node, graph, gather_dependencies, 1, &gather_params));
+	}
+
+	{
+		void *args[3] = { &gpu_data, &width, &height };
+
+		cudaGraphNode_t dependencies[1] = { gather_node };
+
+		cudaKernelNodeParams params = { 0 };
+		params.func = &scatter;
+		params.gridDim = dim3(num_cells_x, num_cells_y, 1);
+		params.blockDim = dim3(c, c, 1);
+		params.sharedMemBytes = c * c * sizeof(rgb);
+		params.kernelParams = args;
+		params.extra = NULL;
+
+		cuda_check_error(cudaGraphAddKernelNode(&scatter_node, graph, dependencies, 1, &params));
+	}
+
+	{
+
+		void *args[5] = { &gpu_data, &gpu_global_avg, &width, &height, &c };
+
+		cudaGraphNode_t dependencies[1] = { gather_node };
+
+		cudaKernelNodeParams params = { 0 };
+		params.func = &global_avg;
+		params.gridDim = dim3(global_avg_dim, global_avg_dim, 1);
+		params.blockDim = dim3(num_cells_x / global_avg_dim, num_cells_y / global_avg_dim, 1);
+		params.sharedMemBytes = (num_cells_x / global_avg_dim) * (num_cells_y / global_avg_dim) * sizeof(rgb);
+		params.kernelParams = args;
+		params.extra = NULL;
+
+		cuda_check_error(cudaGraphAddKernelNode(&avg_node, graph, dependencies, 1, &params));
+	}
+
+	{
+		cudaGraphNode_t dependencies[1] = { scatter_node };
+
+		cudaMemcpy3DParms params = { 0 };
+		params.srcArray = NULL;
+		params.srcPos = make_cudaPos(0, 0, 0);
+		params.srcPtr =
+			make_cudaPitchedPtr(gpu_data, sizeof(rgb) * width * height, width * height, 1);
+		params.dstArray = NULL;
+		params.dstPos = make_cudaPos(0, 0, 0);
+		params.dstPtr = make_cudaPitchedPtr(data, sizeof(rgb) * width * height, width * height, 1);
+		params.extent = make_cudaExtent(sizeof(rgb) * width * height, 1, 1);
+		params.kind = cudaMemcpyDeviceToHost;
+
+		cuda_check_error(cudaGraphAddMemcpyNode(&cpy_data_out_node, graph, dependencies, 1, &params));
+	}
+
+	{
+		cudaGraphNode_t dependencies[1] = { avg_node };
+
+		cudaMemcpy3DParms params = { 0 };
+		params.srcArray = NULL;
+		params.srcPos = make_cudaPos(0, 0, 0);
+		params.srcPtr =
+			make_cudaPitchedPtr(gpu_global_avg, sizeof(rgb) * global_avg_dim * global_avg_dim, global_avg_dim * global_avg_dim, 1);
+		params.dstArray = NULL;
+		params.dstPos = make_cudaPos(0, 0, 0);
+		params.dstPtr = make_cudaPitchedPtr(pre_summed_avgs, sizeof(rgb) * global_avg_dim * global_avg_dim, global_avg_dim * global_avg_dim, 1);
+		params.extent = make_cudaExtent(sizeof(rgb) * global_avg_dim * global_avg_dim, 1, 1);
+		params.kind = cudaMemcpyDeviceToHost;
+
+		cuda_check_error(cudaGraphAddMemcpyNode(&cpy_avg_out, graph, dependencies, 1, &params));
+	}
+
+	{
+		cudaGraphNode_t dependencies[1] = { cpy_avg_out };
+
+		void* user_data[3] = {&host_global_avg, pre_summed_avgs, &global_avg_dim};
+
+		cudaHostNodeParams params = { 0 };
+		params.fn = cpu_avg;
+		params.userData = user_data;
+		
+		cuda_check_error(cudaGraphAddHostNode(&cpu_avg_node, graph, dependencies, 1, &params));
+	}
+
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+
+	cudaGraphExec_t executable_graph;
+
+	cuda_check_error(cudaGraphInstantiate(&executable_graph, graph, NULL, NULL, 0));
 
 	//run kernel code
 	cuda_check_error(cudaEventRecord(start));
-	{
-		gather << < dim3(num_cells_x, num_cells_y, 1), dim3(c, c, 1), c * c * sizeof(rgb) >> > (gpu_data, width, height);
-		cuda_check_error(cudaGetLastError());
-		cuda_check_error(cudaDeviceSynchronize());
-	}
-	{
-		scatter << < dim3(num_cells_y, num_cells_y, 1), dim3(c, c, 1), c * c * sizeof(rgb), scatter_stream >> > (gpu_data, width, height);
-		cuda_check_error(cudaGetLastError());
-		cuda_check_error(cudaMemcpyAsync(data, gpu_data, width*height * sizeof(rgb), cudaMemcpyDeviceToHost, scatter_stream));
-	}
-
-	{
-		global_avg << < dim3(global_avg_dim, global_avg_dim, 1), dim3(num_cells_x / global_avg_dim, num_cells_y / global_avg_dim, 1), (num_cells_x / global_avg_dim) * (num_cells_y / global_avg_dim) * sizeof(rgb), avg_stream >> > (gpu_data, gpu_global_avg, width, height, c);
-		cuda_check_error(cudaGetLastError());
-		cuda_check_error(cudaMemcpyAsync(pre_summed_avgs, gpu_global_avg, (global_avg_dim*global_avg_dim) * sizeof(rgb), cudaMemcpyDeviceToHost, avg_stream));
-	}
-	//wait for average to complete, then do the final small gather on the cpu
-	cuda_check_error(cudaStreamSynchronize(avg_stream));
-
-	big_rgb global_avg = { 0,0,0 };
-
-	for (int i = 0; i < (global_avg_dim*global_avg_dim); i++) {
-		global_avg.r += pre_summed_avgs[i].r;
-		global_avg.g += pre_summed_avgs[i].g;
-		global_avg.b += pre_summed_avgs[i].b;
-	}
-
-	free(pre_summed_avgs);
-
-	global_avg.r /= (global_avg_dim*global_avg_dim);
-	global_avg.g /= (global_avg_dim*global_avg_dim);
-	global_avg.b /= (global_avg_dim*global_avg_dim);
+	cuda_check_error(cudaGraphLaunch(executable_graph, stream));
+	cuda_check_error(cudaStreamSynchronize(stream));
 
 	cuda_check_error(cudaFree(gpu_global_avg));
-
-	//wait for scatter to complete
-	cuda_check_error(cudaStreamSynchronize(scatter_stream));
-
-	//free scatter memory
 	cuda_check_error(cudaFree(gpu_data));
 
-	cuda_check_error(cudaStreamSynchronize(avg_stream));
 	cuda_check_error(cudaEventRecord(stop));
 	cuda_check_error(cudaEventSynchronize(stop));
 
-	cudaStreamDestroy(scatter_stream);
-	cudaStreamDestroy(avg_stream);
+	cudaStreamDestroy(stream);
 
 	// Output the average colour value for the image
-	printf("CUDA Average image colour red = %u, green = %u, blue = %u \n", global_avg.r, global_avg.g, global_avg.b);
+	printf("CUDA Average image colour red = %u, green = %u, blue = %u \n", host_global_avg.r, host_global_avg.g, host_global_avg.b);
 
 	//end timing here
 	double end = omp_get_wtime();
