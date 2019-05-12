@@ -206,6 +206,20 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 	cuda_check_error(cudaMalloc((void**)&gpu_data, width*height * sizeof(rgb)));
 
 	//setup graph
+
+	// the graph looks like this:
+
+	//          cpy_data_in
+	//               |
+	//             gather
+	//               |
+	//       /----------------\
+	//       |                |
+	//    scatter            avg
+	//       |                |
+	//   cpy_data_out    cpy_avg_out
+	//                        |
+	//                     cpu_avg
 	cudaGraph_t graph;
 	cudaGraphNode_t cpy_data_in_node, cpy_data_out_node, gather_node, scatter_node, avg_node, cpy_avg_out, cpu_avg_node;
 
@@ -276,8 +290,6 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 		params.sharedMemBytes = block_x* block_y * sizeof(rgb);
 		params.kernelParams = args;
 		params.extra = NULL;
-
-		fprintf(stderr, "avg_block_size: %d, block_x: %d, block_y: %d, grid_dim_x: %d, grid_dim_y: %d, required_sm: %d\n", avg_block_size, block_x, block_y, grid_dim_x, grid_dim_y, block_x * block_y * sizeof(rgb));
 
 		cuda_check_error(cudaGraphAddKernelNode(&avg_node, graph, dependencies, 1, &params));
 	}
