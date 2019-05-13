@@ -248,18 +248,14 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 	{
 		row_reduction << < dim3(num_cells_x, height/sub_block_size, 1), dim3(c, sub_block_size, 1), sub_block_size * c * sizeof(rgb) >> > (gpu_data, width, height);
 		cuda_check_error(cudaGetLastError());
-		fprintf(stderr, "row_reduction done\n");
 		col_reduction << < dim3(width/ sub_block_size, num_cells_y, 1), dim3(sub_block_size, c, 1), sub_block_size * c * sizeof(rgb) >> > (gpu_data, width, height);
 		cuda_check_error(cudaGetLastError());
-		fprintf(stderr, "col_reduction done\n");
 	}
 	{
 		col_scatter << < dim3(width/ sub_block_size, num_cells_y, 1), dim3(sub_block_size, c, 1), sub_block_size * c * sizeof(rgb) >> > (gpu_data, width, height);
 		cuda_check_error(cudaGetLastError());
-		fprintf(stderr, "col_scatter done\n");
 		row_scatter << < dim3(num_cells_x, height/ sub_block_size, 1), dim3(c, sub_block_size, 1), sub_block_size * c * sizeof(rgb) >> > (gpu_data, width, height);
 		cuda_check_error(cudaGetLastError());
-		fprintf(stderr, "row_scatter done\n");
 	}
 	{
 		int block_x = sqrt(avg_block_size);
