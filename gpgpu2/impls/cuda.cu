@@ -12,6 +12,9 @@
 	}\
 }
 
+
+//Averages a block of pixels from right to left into the leftmost column of
+//their cell.
 //requirements:
 //   blockDim.x == c, blockDim.y == n
 //   gridDim.x == num_cells_x , gridDim.y == ceil(height/n)
@@ -46,6 +49,8 @@ __global__ void row_reduction(rgb* data, unsigned int width, unsigned int height
 	}
 }
 
+//Averages a block of pixels from bottom to top into the topmost row of
+//their cell.
 //requirements:
 //   blockDim.x == 1, blockDim.y == c
 //   gridDim.x == height , gridDim.y == num_cells_y
@@ -80,6 +85,7 @@ __global__ void col_reduction(rgb* data, unsigned int width, unsigned int height
 	}
 }
 
+//Copies the top left most pixel back across the cell
 //requirements:
 //   blockDim.x == c, blockDim.y == 1
 //   gridDim.x == num_cells_x , gridDim.y == height
@@ -115,6 +121,7 @@ __global__ void row_scatter(rgb* data, unsigned int width, unsigned int height) 
 	}
 }
 
+//Copies the top row down acrss the cell
 //requirements:
 //   blockDim.x == 1, blockDim.y == c
 //   gridDim.x == width , gridDim.y == num_cells_y
@@ -150,6 +157,7 @@ __global__ void col_scatter(rgb* data, unsigned int width, unsigned int height) 
 	}
 }
 
+//computes a single average for the whole image
 //requirements:
 //   blockDim.x == num_cells_x/gridDim.x, blockDim.y == num_cells_y/gridDim.y
 __global__ void global_avg(const rgb* data, rgb* global_avg, unsigned int width, unsigned int height, unsigned int c) {
@@ -233,6 +241,8 @@ void run_cuda(rgb* data, unsigned int width, unsigned int height, unsigned int w
 
 	//run kernel code
 	cuda_check_error(cudaEventRecord(start));
+	//scale the overall block dimension by c to get as large a block as possible while keeping under
+	//the limit for shared memory as best we can
 	//56 is based on the max shared memory size for most cuda devices
 	int sub_block_size = (56 + (c - 1)) / c;
 	{
